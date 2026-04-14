@@ -1,74 +1,48 @@
-    async def execute_automation(self):
-        """执行自动化流程"""
-        browser = None
-        try:
-            async with async_playwright() as p:
-                self.update_progress(5, "正在连接本地Chrome浏览器...")
-                
-                # 尝试多种方式连接本地Chrome
-                browser = await self.launch_local_chrome(p)
-                
-                if not browser:
-                    raise Exception("未找到本地Chrome浏览器，请确保已安装Chrome")
-                
-                context = await browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    ignore_https_errors=True
-                )
-                
-                page = await context.new_page()
-                
-                # ... 后续代码保持不变 ...
+name: Build Windows EXE
 
-    async def launch_local_chrome(self, playwright):
-        """尝试启动本地Chrome"""
-        launch_options = {
-            "headless": self.config["headless"],
-            "args": [
-                '--ignore-certificate-errors',
-                '--ignore-certificate-errors-spki-list',
-                '--disable-web-security',
-                '--no-first-run',
-                '--no-default-browser-check'
-            ],
-            "slow_mo": self.config["slow_mo"]
-        }
-        
-        # 方法1：使用 channel="chrome"（Playwright自动找系统Chrome）
-        try:
-            self.log("尝试通过channel启动Chrome...")
-            browser = await playwright.chromium.launch(
-                **launch_options,
-                channel="chrome"
-            )
-            self.log("✓ 成功连接到系统Chrome")
-            return browser
-        except Exception as e:
-            self.log(f"channel方式失败: {e}")
-        
-        # 方法2：手动指定常见Chrome路径
-        chrome_paths = [
-            # Windows 默认路径
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            # 用户级安装
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-            # 其他可能位置
-            r"D:\Program Files\Google\Chrome\Application\chrome.exe",
-        ]
-        
-        for chrome_path in chrome_paths:
-            if os.path.exists(chrome_path):
-                try:
-                    self.log(f"尝试指定路径: {chrome_path}")
-                    browser = await playwright.chromium.launch(
-                        **launch_options,
-                        executable_path=chrome_path
-                    )
-                    self.log(f"✓ 成功使用Chrome: {chrome_path}")
-                    return browser
-                except Exception as e:
-                    self.log(f"该路径失败: {e}")
-                    continue
-        
-        return None
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Build executable
+      run: |
+        pyinstaller --onefile --windowed `
+          --name "海康自动化工具" `
+          --hidden-import=playwright `
+          --hidden-import=playwright.async_api `
+          --hidden-import=winreg `
+          --clean `
+          main.py
+    
+    - name: Upload artifact (v4)
+      uses: actions/upload-artifact@v4
+      with:
+        name: hikvision-auto-exe
+        path: dist/*.exe
+        retention-days: 30
+    
+    - name: Create Release
+      if: github.event_name == 'push' && contains(github.event.head_commit.message, 'release')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/*.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
