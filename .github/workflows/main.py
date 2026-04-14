@@ -9,22 +9,23 @@ import asyncio
 import json
 import os
 import sys
+import winreg
 from pathlib import Path
 from playwright.async_api import async_playwright
 import tkinter as tk
 from tkinter import messagebox, ttk
 import threading
+import datetime
 
-# 配置文件路径（打包后放在exe同目录）
+# 配置文件路径
 def get_config_path():
     if getattr(sys, 'frozen', False):
-        # 打包后的exe运行
         return Path(sys.executable).parent / "config.json"
     else:
-        # 开发环境
         return Path(__file__).parent / "config.json"
 
 CONFIG_FILE = get_config_path()
+
 
 class HikvisionApp:
     def __init__(self):
@@ -33,12 +34,6 @@ class HikvisionApp:
         self.root.title("海康威视自动化工具 v1.0")
         self.root.geometry("500x400")
         self.root.resizable(False, False)
-        
-        # 设置图标（如果有的话）
-        try:
-            self.root.iconbitmap(default='')
-        except:
-            pass
         
         # 居中窗口
         screen_width = self.root.winfo_screenwidth()
@@ -51,7 +46,7 @@ class HikvisionApp:
         
     def setup_ui(self):
         """设置界面"""
-        # 标题
+        # 标题栏
         title_frame = tk.Frame(self.root, bg="#1890ff", height=60)
         title_frame.pack(fill=tk.X)
         title_frame.pack_propagate(False)
@@ -114,7 +109,6 @@ class HikvisionApp:
         
     def log(self, message):
         """添加日志"""
-        import datetime
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         full_msg = f"[{timestamp}] {message}"
         
@@ -132,8 +126,8 @@ class HikvisionApp:
             "url": "https://10.108.90.1",
             "username": "",
             "password": "",
-            "headless": True,  # True=隐藏浏览器，False=显示
-            "slow_mo": 500     # 操作延迟毫秒
+            "headless": True,
+            "slow_mo": 500
         }
         
         if CONFIG_FILE.exists():
@@ -213,8 +207,44 @@ class HikvisionApp:
                  bg="#1890ff", fg="white", font=("Microsoft YaHei", 11, "bold"),
                  width=15, relief=tk.FLAT, cursor="hand2").pack(pady=10)
     
+    def check_chrome_installed(self):
+        """检查是否安装了Chrome"""
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            r"D:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"E:\Program Files\Google\Chrome\Application\chrome.exe",
+        ]
+        
+        for path in chrome_paths:
+            if os.path.exists(path):
+                return True, path
+        
+        # 尝试从注册表查找
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+            chrome_path, _ = winreg.QueryValueEx(key, "")
+            winreg.CloseKey(key)
+            if os.path.exists(chrome_path):
+                return True, chrome_path
+        except:
+            pass
+            
+        return False, None
+
     def start_task(self):
         """启动任务"""
+        # 检查Chrome是否安装
+        has_chrome, chrome_path = self.check_chrome_installed()
+        if not has_chrome:
+            messagebox.showerror("缺少Chrome浏览器", 
+                "未检测到Google Chrome浏览器。\n\n"
+                "请访问 https://www.google.cn/chrome/ 下载安装\n"
+                "或安装后重试。")
+            return
+        
+        # 检查账号配置
         if not self.config["username"] or not self.config["password"]:
             messagebox.showwarning("提示", "请先设置账号密码！\n\n点击「账号设置」按钮进行配置。")
             self.show_settings()
@@ -222,6 +252,8 @@ class HikvisionApp:
         
         self.start_btn.config(state=tk.DISABLED, text="执行中...", bg="#ccc")
         self.progress['value'] = 0
+        self.log(f"检测到Chrome: {chrome_path}")
+        self.log("启动自动化任务...")
         
         # 在新线程运行（避免阻塞UI）
         thread = threading.Thread(target=self.run_async_task, daemon=True)
@@ -237,22 +269,66 @@ class HikvisionApp:
         finally:
             self.root.after(0, self.reset_ui)
     
+    async def launch_local_chrome(self, playwright):
+        """尝试启动本地Chrome"""
+        launch_options = {
+            "headless": self.config["headless"],
+            "args": [
+                '--ignore-certificate-errors',
+                '--ignore-certificate-errors-spki-list',
+                '--disable-web-security',
+                '--no-first-run',
+                '--no-default-browser-check'
+            ],
+            "slow_mo": self.config["slow_mo"]
+        }
+        
+        # 方法1：使用 channel="chrome"
+        try:
+            self.log("尝试连接系统Chrome...")
+            browser = await playwright.chromium.launch(
+                **launch_options,
+                channel="chrome"
+            )
+            self.log("✓ 成功连接到Chrome")
+            return browser
+        except Exception as e:
+            self.log(f"channel方式失败: {str(e)[:50]}")
+        
+        # 方法2：手动指定常见路径
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        
+        for chrome_path in chrome_paths:
+            if os.path.exists(chrome_path):
+                try:
+                    self.log(f"尝试路径: {chrome_path[-30:]}")
+                    browser = await playwright.chromium.launch(
+                        **launch_options,
+                        executable_path=chrome_path
+                    )
+                    self.log(f"✓ 成功启动Chrome")
+                    return browser
+                except Exception as e:
+                    self.log(f"该路径失败")
+                    continue
+        
+        return None
+    
     async def execute_automation(self):
         """执行自动化流程"""
         browser = None
         try:
             async with async_playwright() as p:
-                self.update_progress(5, "正在启动浏览器...")
+                self.update_progress(5, "正在连接Chrome浏览器...")
                 
-                browser = await p.chromium.launch(
-                    headless=self.config["headless"],
-                    args=[
-                        '--ignore-certificate-errors',
-                        '--ignore-certificate-errors-spki-list',
-                        '--disable-web-security'
-                    ],
-                    slow_mo=self.config["slow_mo"]
-                )
+                browser = await self.launch_local_chrome(p)
+                
+                if not browser:
+                    raise Exception("无法启动Chrome浏览器，请确保Chrome已正确安装")
                 
                 context = await browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
@@ -267,7 +343,6 @@ class HikvisionApp:
                 await asyncio.sleep(2)
                 
                 self.update_progress(25, "正在填写账号信息...")
-                # 尝试多种用户名输入框
                 user_selectors = [
                     'input[name="username"]',
                     'input[placeholder*="用户名"]',
@@ -280,14 +355,12 @@ class HikvisionApp:
                     except:
                         continue
                 
-                # 填写密码
                 await page.fill('input[type="password"]', self.config["password"])
                 
                 self.update_progress(35, "正在登录...")
                 await page.click('button[type="submit"], button.el-button--primary, .login-btn')
                 await asyncio.sleep(4)
                 
-                # 检查登录结果
                 if "login" in page.url.lower() or await page.query_selector('input[type="password"]'):
                     raise Exception("登录失败，请检查账号密码或网络连接")
                 
@@ -310,14 +383,14 @@ class HikvisionApp:
                 
                 self.update_progress(75, "正在点击入侵报警...")
                 await self.click_menu(page, "入侵报警")
-                await asyncio.sleep(5)  # 等待iframe/表格加载
+                await asyncio.sleep(5)
                 
                 # 4. 查找并点击详情图标
                 self.update_progress(85, "正在查找详情图标...")
                 
                 clicked = await self.click_detail_icon(page)
                 if not clicked:
-                    raise Exception("未找到详情图标（h-icon-details），请确认页面已加载完成")
+                    raise Exception("未找到详情图标（h-icon-details）")
                 
                 await asyncio.sleep(2)
                 
@@ -330,7 +403,6 @@ class HikvisionApp:
                 self.update_progress(100, "✅ 执行完成！")
                 self.log("所有操作已成功执行")
                 
-                # 保持浏览器打开几秒让用户看到结果
                 await asyncio.sleep(3)
                 
                 if browser:
@@ -347,7 +419,7 @@ class HikvisionApp:
             raise
     
     async def click_menu(self, page, text):
-        """点击菜单（支持多种选择器）"""
+        """点击菜单"""
         selectors = [
             f'text="{text}"',
             f'//span[contains(text(),"{text}")]',
@@ -366,7 +438,6 @@ class HikvisionApp:
             except:
                 continue
         
-        # 如果都失败，尝试JavaScript点击
         try:
             await page.evaluate(f'''
                 () => {{
@@ -385,35 +456,28 @@ class HikvisionApp:
             raise Exception(f"无法点击菜单: {text}, {e}")
     
     async def click_detail_icon(self, page):
-        """点击详情图标（支持iframe）"""
-        # 获取所有frames（包括主页面）
-        frames = [page] + page.frames[1:]  # 主页面 + 所有子frame
+        """点击详情图标"""
+        frames = [page] + page.frames[1:]
         
         for frame in frames:
             try:
-                # 策略1：精确匹配 h-icon-details
                 icons = await frame.query_selector_all('i.h-icon-details')
                 if icons and len(icons) > 0:
                     await icons[0].click()
                     self.log("已点击 h-icon-details 图标")
                     return True
                 
-                # 策略2：模糊匹配
                 icons = await frame.query_selector_all('i[class*="details"], i[class*="detail"]')
                 if icons and len(icons) > 0:
                     await icons[0].click()
                     self.log("已点击详情图标（模糊匹配）")
                     return True
                 
-                # 策略3：表格第一行操作列
                 rows = await frame.query_selector_all('table tbody tr, .el-table__row')
                 if rows and len(rows) > 0:
-                    # 获取第一行的所有单元格
                     cells = await rows[0].query_selector_all('td')
                     if cells and len(cells) > 0:
-                        # 最后一列通常是操作列
                         last_cell = cells[-1]
-                        # 在操作列内找图标或按钮
                         btn = await last_cell.query_selector('i, button, a')
                         if btn:
                             await btn.click()
@@ -431,14 +495,12 @@ class HikvisionApp:
         
         for frame in frames:
             try:
-                # 策略1：精确文本匹配
                 btn = await frame.query_selector('button:has-text("在线获取")')
                 if btn:
                     await btn.click()
                     self.log("已点击在线获取按钮")
                     return True
                 
-                # 策略2：所有按钮中查找
                 buttons = await frame.query_selector_all('button, a')
                 for btn in buttons:
                     text = await btn.text_content()
@@ -453,7 +515,7 @@ class HikvisionApp:
         return False
     
     def update_progress(self, value, message):
-        """更新进度（线程安全）"""
+        """更新进度"""
         self.root.after(0, lambda: self._do_update(value, message))
     
     def _do_update(self, value, message):
@@ -464,8 +526,8 @@ class HikvisionApp:
         """重置界面"""
         self.start_btn.config(state=tk.NORMAL, text="▶ 开始执行", bg="#1890ff")
 
+
 if __name__ == "__main__":
-    # 检查配置文件
     if not CONFIG_FILE.exists():
         default = {
             "url": "https://10.108.90.1",
